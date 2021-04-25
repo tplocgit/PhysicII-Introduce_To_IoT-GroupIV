@@ -1,17 +1,59 @@
 #include <LiquidCrystal_I2C.h>
+#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
 #include "DHT.h"
+#include <Time.h>;
+#include <NTPClient_Generic.h>
+// change next line to use with another board/shield
+#include <ESP8266WiFi.h>
+//#include <WiFi.h> // for WiFi shield
+//#include <WiFi101.h> // for WiFi 101 shield or MKR1000
+#include <WiFiUdp.h>
+//for LED status
+#include <Ticker.h>
+Ticker ticker;
 
+#ifndef LED_BUILTIN
+#define LED_BUILTIN 13 // ESP32 DOES NOT DEFINE LED_BUILTIN
+#endif
+
+int LED = LED_BUILTIN;
+
+// Pin && CONST
 #define DHTPIN D4
-#define CN07PIN D3
+#define CN07PIN D5
+#define BUZZER_PIN D6
+#define BUTTON_N1_PIN D7
 #define DHTTYPE DHT11 // DHT 11
+#define VN_TIME_OFFSET 25200
+
+// Options
 #define TEMPERATURE 0
 #define HUMIDITY 1
 #define SOUND 2
+#define TIME 4
+
+// For LCD display
 #define DEGREE 3
+#define MUSIC_NODE 4
 #define QUESTION_MARK 0
 #define SOUND_DETECTED_MSG "DETECTED"
 #define SILENCE_DETECTED_MSG "SILENCE"
-#define BUZZER_PIN D5
+
+
+WiFiUDP ntpUDP;
+
+// By default 'pool.ntp.org' is used with 60 seconds update interval and
+// no offset
+NTPClient timeClient(ntpUDP);
+
+// You can specify the time server pool and the offset, (in seconds)
+// additionally you can specify the update interval (in milliseconds).
+// NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 3600, 60000);
+
+String formattedDate;
+String dayStamp;
+String timeStamp;
+
 
 bool silenceMode = false;
 
@@ -36,7 +78,16 @@ byte QUESTION_MARK_SYMBOL[] = {
   B00000,
   B00100
 };
-
+byte MUSIC_SYMBOL[] = {
+  B00000,
+  B01111,
+  B01001,
+  B01111,
+  B01001,
+  B11011,
+  B11011,
+  B00000
+};
 LiquidCrystal_I2C lcd(0x27,16,2);  // set the LCD address to 0x27 for a 16 chars and 2 line display
 
 DHT dht(DHTPIN, DHTTYPE);
@@ -195,19 +246,85 @@ int wholenote = (60000 * 4) / tempo;
 
 int divider = 0, noteDuration = 0;
 //----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-
-void setup()
+void tick()
 {
+  //toggle state
+  digitalWrite(LED, !digitalRead(LED));     // set pin to the opposite state
+}
+//gets called when WiFiManager enters configuration mode
+void configModeCallback (WiFiManager *myWiFiManager) {
+  Serial.println("Entered config mode");
+  Serial.println(WiFi.softAPIP());
+  //if you used auto generated SSID, print it
+  Serial.println(myWiFiManager->getConfigPortalSSID());
+  //entered config mode, make led toggle faster
+  ticker.attach(0.2, tick);
+}
+
+void lcdSetup(){
   lcd.init();                      // initialize the lcd 
-  dht.begin();
   // Print a message to the LCD.
   lcd.backlight();
   lcd.print("Hello, World!!!");
   lcd.createChar(byte(DEGREE), DEG_SYMBOL);
   lcd.createChar(byte(QUESTION_MARK), QUESTION_MARK_SYMBOL);
-  pinMode(BUZZER_PIN, OUTPUT);
+  lcd.createChar(byte(MUSIC_NODE), MUSIC_SYMBOL);
 }
+
+void autoConnectWifiSetup(){
+  lcd.print("Connecting Wifi ...");
+  WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
+  // put your setup code here, to run once:
+  
+  //set led pin as output
+  pinMode(LED, OUTPUT);
+  // start ticker with 0.5 because we start in AP mode and try to connect
+  ticker.attach(0.6, tick);
+
+  //WiFiManager
+  //Local intialization. Once its business is done, there is no need to keep it around
+  WiFiManager wm;
+  //reset settings - for testing
+  // wm.resetSettings();
+
+  //set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
+  wm.setAPCallback(configModeCallback);
+
+  //fetches ssid and pass and tries to connect
+  //if it does not connect it starts an access point with the specified name
+  //here  "AutoConnectAP"
+  //and goes into a blocking loop awaiting configuration
+  if (!wm.autoConnect()) {
+    Serial.println("failed to connect and hit timeout");
+    //reset and try again, or maybe put it to deep sleep
+    ESP.restart();
+    delay(1000);
+  }
+
+  //if you get here you have connected to the WiFi
+  Serial.println("connected...yeey :)");
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Connected!");
+  ticker.detach();
+  //keep LED on
+  digitalWrite(LED, LOW);
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  lcdSetup();
+  autoConnectWifiSetup();
+  timeClient.begin();
+  timeClient.setTimeOffset(VN_TIME_OFFSET);
+  dht.begin();
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(BUTTON_N1_PIN,INPUT);
+  
+}
+
+
 
 void printSymbolLCD(byte symbol) {
   lcd.write(symbol);
@@ -255,6 +372,34 @@ void printSoundLCD(){
   else lcd.print(SILENCE_DETECTED_MSG);
 }
 
+void printTimeLCD(){
+  timeClient.update();
+  int curYear = timeClient.getYear();
+  String curMonth = timeClient.getMonthStr();
+  int curDay = timeClient.getDay();
+  String curDoW = timeClient.getDoW();
+  String curHours = timeClient.getStrHours();
+  String curMinutes = timeClient.getStrMinutes();
+  String curSeconds = timeClient.getStrSeconds();
+  
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(curDoW);
+  lcd.print(" ");
+  lcd.print(curMonth);
+  lcd.print(" ");
+  lcd.print(curDay);
+  lcd.print(" ");
+  lcd.print(curYear);
+
+  lcd.setCursor(4,1);
+  lcd.print(curHours);
+  lcd.print(":");
+  lcd.print(curMinutes);
+  lcd.print(":");
+  lcd.print(curSeconds);
+}
+
 void printErrorOptionLCD(){
   lcd.setCursor(0,0);
   lcd.clear();
@@ -271,6 +416,9 @@ void printLCD(int option){
       break;
     case SOUND:
       printSoundLCD();
+      break;
+    case TIME:
+      printTimeLCD();
       break;
     default:
       printErrorOptionLCD();
@@ -298,8 +446,19 @@ void playBuzzer() {
 void playSong() {
   // iterate over the notes of the melody. 
   // Remember, the array is twice the number of notes (notes + durations)
-  for (int thisNote = 0; thisNote < notes * 2; thisNote = thisNote + 2) {
-
+  if(silenceMode) return;
+  int dot = 0;
+  for (int thisNote = 0; thisNote < notes * 2 && !silenceMode; thisNote = thisNote + 2) {
+    Serial.println(silenceMode);
+    lcd.setCursor(0,0);
+    lcd.print("Playing song");
+    lcd.setCursor(8,1);
+    for(int i = 0; i <= dot; ++i)
+      printSymbolLCD(MUSIC_NODE);
+    dot++;
+    dot %= 8;
+    if(buttonPressed(BUTTON_N1_PIN))
+        silenceMode = !silenceMode;
     // calculates the duration of each note
     divider = melody[thisNote + 1];
     if (divider > 0) {
@@ -319,25 +478,16 @@ void playSong() {
     
     // stop the waveform generation before the next note.
     noTone(BUZZER_PIN);
-
-     if(soundDetected()){
-      noTone(BUZZER_PIN);
-      silenceMode = true;
-      break;  
-    }
+    lcd.clear();
   } 
 }
 
+bool buttonPressed(int btnPin) {
+  return digitalRead(btnPin) == HIGH;
+}
+
 void loop() {
-  /*if(!silenceMode) {
-    //playBuzzer();
-    playSong();
-  }
-  else
-    noTone(BUZZER_PIN);
-  if(silenceMode && soundDetected())
-    silenceMode = false;*/
-  printLCD(SOUND);
-  delay(100);
-  lcd.clear();
+  printLCD(TIME);
+  
+  delay(1000);
 }
