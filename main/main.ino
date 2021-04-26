@@ -10,8 +10,12 @@
 #include <WiFiUdp.h>
 //for LED status
 #include <Ticker.h>
-Ticker ticker;
+#include <ESP8266HTTPClient.h>
+#include <PubSubClient.h>
+#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
+#include <ArduinoJson.h>
 
+// defines
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 13 // ESP32 DOES NOT DEFINE LED_BUILTIN
 #endif
@@ -24,7 +28,15 @@ int LED = LED_BUILTIN;
 #define BUZZER_PIN D6
 #define BUTTON_N1_PIN D7
 #define DHTTYPE DHT11 // DHT 11
-#define VN_TIME_OFFSET 25200
+#define VN_TIME_OFFSET 25200 // VN lead (+7hour * 60secs) seconds
+#define MQTT_SERVER "broker.mqtt-dashboard.com"
+#define IN_TOPIC "inTopic4444"
+#define TEMPERATURE_CELSIUS_TOPIC "ab2d253a386ab74e2ffe63437d49587d"
+#define TEMPERATURE_FAHRENHEIT_TOPIC "10c633befbfb97d88c7cb929a924670c"
+#define HUMIDITY_TOPIC "cf10703b86de19ab2c80a82901b41460"
+#define SOUND_TOPIC "73b2b6a2eb898ac5a6bb84feb6aebb3a"
+#define SET_ALARM_TOPIC "8bd85b302e7a9fc32ff59b51d40e7c4b"
+#define MQTT_SERVER_PORT 1883
 
 // Options
 #define TEMPERATURE 0
@@ -38,7 +50,9 @@ int LED = LED_BUILTIN;
 #define QUESTION_MARK 0
 #define SOUND_DETECTED_MSG "DETECTED"
 #define SILENCE_DETECTED_MSG "SILENCE"
+#define MAX_JSON_BUF 1024
 
+Ticker ticker;
 
 WiFiUDP ntpUDP;
 
@@ -49,10 +63,21 @@ NTPClient timeClient(ntpUDP);
 // You can specify the time server pool and the offset, (in seconds)
 // additionally you can specify the update interval (in milliseconds).
 // NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 3600, 60000);
+WiFiClient espClient;
+PubSubClient client(espClient);
 
+// Reuseable global vars
 String formattedDate;
 String dayStamp;
 String timeStamp;
+long lastMsg = 0;
+char msg[50];
+int value = 0;
+float count = 0;
+DynamicJsonDocument doc(MAX_JSON_BUF);
+unsigned int alarmSeconds = 0;
+bool repeat = false;
+bool rang = true;
 
 
 bool silenceMode = false;
@@ -246,6 +271,88 @@ int wholenote = (60000 * 4) / tempo;
 
 int divider = 0, noteDuration = 0;
 //----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+void sendNum(float value){
+  if (!client.connected()) {
+    reconnect();
+  }
+  String pubString = String(value);
+  char* buf = new char[pubString.length() + 1];
+  pubString.toCharArray(buf, pubString.length()+1);
+  Serial.println("Sending: iot/humidity -> " + pubString + "%");
+  client.publish(TEMPERATURE_CELSIUS_TOPIC, buf);
+  buf = NULL;
+  delete buf;
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.println("Message arrived on topic ");
+  String messageTemp;
+  
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+    messageTemp += (char)payload[i];
+  }
+
+  if(String(topic) == SET_ALARM_TOPIC) {
+      Serial.print("SET ALARM TOPIC -> ");
+      Serial.println("Message: ");
+      DeserializationError error = deserializeJson(doc, messageTemp);
+      repeat = doc["repeat"];
+      alarmSeconds = doc["seconds"];
+      Serial.println("Time: " + String(alarmSeconds));
+      Serial.println("Repeat: " + String(repeat));
+  }
+
+  
+  Serial.println("Hey you finally awake. You see ...");
+  //delay(5000);
+}
+
+void MQTTClientSetup(){
+  //_________________________________________________
+
+  client.setServer(MQTT_SERVER, MQTT_SERVER_PORT);
+  client.subscribe(SET_ALARM_TOPIC);
+  client.setCallback(callback);
+ 
+  //delay(1000);
+}
+
+void reconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Create a random client ID
+    String clientId = "ESP8266Client-";
+    clientId += String(random(0xffff), HEX);
+    // Attempt to connect
+    if (client.connect(clientId.c_str())) {
+      Serial.println("connected");
+      client.subscribe(SET_ALARM_TOPIC);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
+void sendMessage(String topic, String msg){
+  if (!client.connected()) {
+    reconnect();
+  }
+  char* buf = new char[msg.length() + 1];
+  char* topicBuffer = new char[topic.length() + 1];
+  msg.toCharArray(buf, msg.length()+1);
+  topic.toCharArray(topicBuffer, topic.length() + 1);
+  Serial.println("Sending: " + topic + " -> " + msg);
+  client.publish(topicBuffer, buf);
+  
+  delete buf, topicBuffer;
+}
+
 void tick()
 {
   //toggle state
@@ -316,6 +423,7 @@ void setup()
   Serial.begin(115200);
   lcdSetup();
   autoConnectWifiSetup();
+  MQTTClientSetup();
   timeClient.begin();
   timeClient.setTimeOffset(VN_TIME_OFFSET);
   dht.begin();
@@ -486,8 +594,23 @@ bool buttonPressed(int btnPin) {
   return digitalRead(btnPin) == HIGH;
 }
 
+void sendSensorsDataMessage() {
+  sendMessage(TEMPERATURE_CELSIUS_TOPIC, String(dht.readTemperature()));
+  sendMessage(TEMPERATURE_FAHRENHEIT_TOPIC, String(dht.readTemperature(true)));
+  sendMessage(HUMIDITY_TOPIC, String(dht.readHumidity()));
+  sendMessage(SOUND_TOPIC, String(soundDetected() ? 1 : 0));
+}
+
 void loop() {
+  if (!client.connected())
+    reconnect();
+  client.loop();
   printLCD(TIME);
-  
+  if(timeClient.getEpochTime() == alarmSeconds) {
+    Serial.print("OK la");
+    playSong();
+    delay(1000);
+  }
+  sendSensorsDataMessage();
   delay(1000);
 }
