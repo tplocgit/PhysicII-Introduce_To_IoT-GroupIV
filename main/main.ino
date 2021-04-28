@@ -23,10 +23,12 @@
 int LED = LED_BUILTIN;
 
 // Pin && CONST
-#define DHTPIN D4
+#define DHTPIN D4 
 #define CN07PIN D5
 #define BUZZER_PIN D6
-#define BUTTON_N1_PIN D7
+#define BUTTON_STOP_SOUND_PIN D7
+#define BUTTON_NEXT_PIN D8
+#define BUTTON_PREV_PIN 3 
 #define DHTTYPE DHT11 // DHT 11
 #define VN_TIME_OFFSET 25200 // VN lead (+7hour * 60secs) seconds
 #define MQTT_SERVER "broker.mqtt-dashboard.com"
@@ -39,10 +41,11 @@ int LED = LED_BUILTIN;
 #define MQTT_SERVER_PORT 1883
 
 // Options
-#define TEMPERATURE 0
-#define HUMIDITY 1
-#define SOUND 2
-#define TIME 4
+#define TEMPERATURE 1
+#define HUMIDITY 2
+#define SOUND 3
+#define TIME 0
+#define NUMBER_OF_DISPLAY_OPTION 4
 
 // For LCD display
 #define DEGREE 3
@@ -78,6 +81,8 @@ DynamicJsonDocument doc(MAX_JSON_BUF);
 unsigned int alarmSeconds = 0;
 bool repeat = false;
 bool rang = true;
+int displayOption = TIME;
+unsigned long lastMillis = 0;
 
 
 bool silenceMode = false;
@@ -271,6 +276,27 @@ int wholenote = (60000 * 4) / tempo;
 
 int divider = 0, noteDuration = 0;
 //----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+void reconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Create a random client ID
+    String clientId = "ESP8266Client-";
+    clientId += String(random(0xffff), HEX);
+    // Attempt to connect
+    if (client.connect(clientId.c_str())) {
+      Serial.println("connected");
+      client.subscribe(SET_ALARM_TOPIC);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
 void sendNum(float value){
   if (!client.connected()) {
     reconnect();
@@ -304,7 +330,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   }
 
   
-  Serial.println("Hey you finally awake. You see ...");
+  Serial.println("Hey you, your're finally awake. You see ...");
   //delay(5000);
 }
 
@@ -318,27 +344,6 @@ void MQTTClientSetup(){
   //delay(1000);
 }
 
-void reconnect() {
-  // Loop until we're reconnected
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Create a random client ID
-    String clientId = "ESP8266Client-";
-    clientId += String(random(0xffff), HEX);
-    // Attempt to connect
-    if (client.connect(clientId.c_str())) {
-      Serial.println("connected");
-      client.subscribe(SET_ALARM_TOPIC);
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
-  }
-}
-
 void sendMessage(String topic, String msg){
   if (!client.connected()) {
     reconnect();
@@ -347,7 +352,7 @@ void sendMessage(String topic, String msg){
   char* topicBuffer = new char[topic.length() + 1];
   msg.toCharArray(buf, msg.length()+1);
   topic.toCharArray(topicBuffer, topic.length() + 1);
-  Serial.println("Sending: " + topic + " -> " + msg);
+  //Serial.println("Sending: " + topic + " -> " + msg);
   client.publish(topicBuffer, buf);
   
   delete buf, topicBuffer;
@@ -428,7 +433,7 @@ void setup()
   timeClient.setTimeOffset(VN_TIME_OFFSET);
   dht.begin();
   pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(BUTTON_N1_PIN,INPUT);
+  pinMode(BUTTON_STOP_SOUND_PIN,INPUT);
   
 }
 
@@ -554,9 +559,9 @@ void playBuzzer() {
 void playSong() {
   // iterate over the notes of the melody. 
   // Remember, the array is twice the number of notes (notes + durations)
-  if(silenceMode) return;
+  //if(silenceMode) return;
   int dot = 0;
-  for (int thisNote = 0; thisNote < notes * 2 && !silenceMode; thisNote = thisNote + 2) {
+  for (int thisNote = 0; thisNote < notes * 2; thisNote = thisNote + 2) {
     Serial.println(silenceMode);
     lcd.setCursor(0,0);
     lcd.print("Playing song");
@@ -565,8 +570,10 @@ void playSong() {
       printSymbolLCD(MUSIC_NODE);
     dot++;
     dot %= 8;
-    if(buttonPressed(BUTTON_N1_PIN))
+    if(buttonPressed(BUTTON_STOP_SOUND_PIN)) {
         silenceMode = !silenceMode;
+        break;
+    }
     // calculates the duration of each note
     divider = melody[thisNote + 1];
     if (divider > 0) {
@@ -601,16 +608,47 @@ void sendSensorsDataMessage() {
   sendMessage(SOUND_TOPIC, String(soundDetected() ? 1 : 0));
 }
 
+void runAlarm() {
+    if(timeClient.getEpochTime() == alarmSeconds) {
+      if (repeat)
+        alarmSeconds += 24*3600;
+      
+      Serial.print("Wakeup");
+      playSong();
+  }
+}
+
+void handleDisplayOptionChange() {
+  int modDOption = displayOption % NUMBER_OF_DISPLAY_OPTION;
+  displayOption = displayOption >= 0 ? modDOption : modDOption + NUMBER_OF_DISPLAY_OPTION;
+}
+
+void buttonPressedHandle() {
+  if(buttonPressed(BUTTON_NEXT_PIN)) {
+    Serial.println(String(BUTTON_NEXT_PIN) + " Pressed");
+    ++displayOption;
+  }
+  if(buttonPressed(BUTTON_PREV_PIN)) { 
+    Serial.println(String(BUTTON_PREV_PIN) + " Pressed");
+    --displayOption;
+  }
+  
+  handleDisplayOptionChange();
+}
+
+void handleLCDDisplay(){
+  
+    printLCD(displayOption);
+ 
+}
+
 void loop() {
   if (!client.connected())
     reconnect();
   client.loop();
-  printLCD(TIME);
-  if(timeClient.getEpochTime() == alarmSeconds) {
-    Serial.print("OK la");
-    playSong();
-    delay(1000);
-  }
+  buttonPressedHandle();
+  handleLCDDisplay();
+  runAlarm();
   sendSensorsDataMessage();
-  delay(1000);
+  delay(220);
 }
